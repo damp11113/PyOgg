@@ -16,9 +16,12 @@ class OpusEncoder:
         self._output_buffer: Optional[ctypes.Array] = None
         self._output_buffer_ptr: Optional[ctypes.pointer] = None
 
+
         # An output buffer of 4,000 bytes is recommended in
         # https://opus-codec.org/docs/opus_api-1.3.1/group__opus__encoder.html
         self.set_max_bytes_per_frame(4000)
+
+        self.no_framesize_check = False
 
         self.encoder = self._encoder
 
@@ -243,6 +246,32 @@ class OpusEncoder:
                 opus.opus_strerror(result).decode("utf")
             )
 
+    def enable_voice_enhance(self, enable=True, auto=False) -> None:
+        """Enable Voice Enhancer"""
+        # If we haven't already created an encoder, do so now
+        if self._encoder is None:
+            self._encoder = self._create_encoder()
+
+        if not auto:
+            if enable:
+                signal = opus.OPUS_SIGNAL_VOICE
+            else:
+                signal = opus.OPUS_SIGNAL_MUSIC
+        else:
+            signal = opus.OPUS_AUTO
+
+        result = opus.opus_encoder_ctl(
+            self._encoder,
+            opus.OPUS_SET_SIGNAL_REQUEST,
+            signal
+        )
+        if result != opus.OPUS_OK:
+            raise PyOggError(
+                "Failed to set voice filter" +
+                "the Opus encoder: " +
+                opus.opus_strerror(result).decode("utf")
+            )
+
     def CTL(self, request, *args) -> None:
         # If we haven't already created an encoder, do so now
         if self._encoder is None:
@@ -265,29 +294,34 @@ class OpusEncoder:
         """
         narrowband:
         Narrowband typically refers to a limited range of frequencies suitable for voice communication.
+
         mediumband (unsupported in libopus 1.3+):
         Mediumband extends the frequency range compared to narrowband, providing better audio quality.
+
         wideband:
         Wideband offers an even broader frequency range, resulting in higher audio fidelity compared to narrowband and mediumband.
+
         superwideband:
         Superwideband extends the frequency range beyond wideband, further enhancing audio quality.
+
         fullband (default):
         Fullband provides the widest frequency range among the listed options, offering the highest audio quality.
+
         auto: opus is working auto not force
         """
         # If we haven't already created an encoder, do so now
         if self._encoder is None:
             self._encoder = self._create_encoder()
 
-        if bandwidth == "narrowband":
+        if bandwidth.lower() == "narrowband":
             reqband = opus.OPUS_BANDWIDTH_NARROWBAND
-        elif bandwidth == "mediumband":
+        elif bandwidth.lower() == "mediumband":
             reqband = opus.OPUS_BANDWIDTH_MEDIUMBAND
-        elif bandwidth == "wideband":
+        elif bandwidth.lower() == "wideband":
             reqband = opus.OPUS_BANDWIDTH_WIDEBAND
-        elif bandwidth == "superwideband":
+        elif bandwidth.lower() == "superwideband":
             reqband = opus.OPUS_BANDWIDTH_SUPERWIDEBAND
-        elif bandwidth == "auto":
+        elif bandwidth.lower() == "auto":
             reqband = opus.OPUS_AUTO
         else:
             reqband = opus.OPUS_BANDWIDTH_FULLBAND
@@ -304,7 +338,7 @@ class OpusEncoder:
                 opus.opus_strerror(result).decode("utf")
             )
         
-    def encode(self, pcm: Union[bytes, bytearray, memoryview]) -> memoryview:
+    def encode(self, pcm: Union[bytes, bytearray, memoryview], float=False) -> memoryview:
         """Encodes PCM data into an Opus frame.
 
         `pcm` must be formatted as bytes-like, with each sample taking
@@ -338,20 +372,21 @@ class OpusEncoder:
         )
 
         # Check that we have a valid frame size
-        if os.environ["pyogg_win_libopus_version"] == "hev2":
-            if int(frame_duration) not in [25, 50, 100, 200, 400, 600, 800, 1000, 1200]:
-                raise PyOggError(
-                    "The effective frame duration ({:.1f} ms) "
-                    .format(frame_duration / 10) +
-                    "was not one of the acceptable values."
-                )
-        else:
-            if int(frame_duration) not in [25, 50, 100, 200, 400, 600]:
-                raise PyOggError(
-                    "The effective frame duration ({:.1f} ms) "
-                    .format(frame_duration / 10) +
-                    "was not one of the acceptable values."
-                )
+        if not self.no_framesize_check:
+            if os.environ["pyogg_win_libopus_version"] == "hev2":
+                if int(frame_duration) not in [25, 50, 100, 200, 400, 600, 800, 1000, 1200]:
+                    raise PyOggError(
+                        "The effective frame duration ({:.1f} ms) "
+                        .format(frame_duration / 10) +
+                        "was not one of the acceptable values."
+                    )
+            else:
+                if int(frame_duration) not in [25, 50, 100, 200, 400, 600]:
+                    raise PyOggError(
+                        "The effective frame duration ({:.1f} ms) "
+                        .format(frame_duration / 10) +
+                        "was not one of the acceptable values."
+                    )
 
         # Create a ctypes object sharing the memory of the PCM data
         PcmCtypes = ctypes.c_ubyte * len(pcm)
@@ -368,23 +403,35 @@ class OpusEncoder:
             # The data must be copied if it's not writeable
             pcm_ctypes = PcmCtypes.from_buffer_copy(pcm)
 
-        # Create a pointer to the PCM data
-        pcm_ptr = ctypes.cast(
-            pcm_ctypes,
-            ctypes.POINTER(opus.opus_int16)
-        )
-
-        # Create an int giving the frame size per channel
-        frame_size_int = ctypes.c_int(frame_size)
-
         # Encode PCM
-        result = opus.opus_encode(
-            self._encoder,
-            pcm_ptr,
-            frame_size_int,
-            self._output_buffer_ptr,
-            self._max_bytes_per_frame
-        )
+        if float:
+            # Create a pointer to the PCM data
+            pcm_ptr = ctypes.cast(
+                pcm_ctypes,
+                ctypes.POINTER(opus.opus_float)
+            )
+            result = opus.opus_encode_float(
+                self._encoder,
+                pcm_ptr,
+                ctypes.c_int(frame_size),
+                self._output_buffer_ptr,
+                self._max_bytes_per_frame
+            )
+        else:
+            # Create a pointer to the PCM data
+            pcm_ptr = ctypes.cast(
+                pcm_ctypes,
+                ctypes.POINTER(opus.opus_int16)
+            )
+            # Create an int giving the frame size per channel
+            frame_size_int = ctypes.c_int(frame_size)
+            result = opus.opus_encode(
+                self._encoder,
+                pcm_ptr,
+                frame_size_int,
+                self._output_buffer_ptr,
+                self._max_bytes_per_frame
+            )
 
         # Check for any errors
         if result < 0:
@@ -542,5 +589,3 @@ class OpusEncoder:
 
         # Return our newly-created encoder
         return encoder
-
-
